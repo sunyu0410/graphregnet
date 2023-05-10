@@ -1,12 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[ ]:
 
-
-# imports
-
-import nibabel as nib
 import numpy as np
 import os
 import random
@@ -24,34 +19,10 @@ from torch.autograd.functional import jacobian as J
 from utils import *
 
 
-# In[ ]:
 
-
-# settings
-
-# data
-cases = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44]
-fold = 0
-if fold == 0:  
-    test_cases = [0, 5, 10, 15, 20, 25, 30, 35, 40]
-elif fold == 1:
-    test_cases = [1, 6, 11, 16, 21, 26, 31, 36, 41]
-elif fold == 2:
-    test_cases = [2, 7, 12, 17, 22, 27, 32, 37, 42]
-elif fold == 3:
-    test_cases = [3, 8, 13, 18, 23, 28, 33, 38, 43]
-elif fold == 4:
-    test_cases = [4, 9, 14, 19, 24, 29, 32, 39, 44]
-train_cases = [i for i in cases if not i in test_cases]
 
 # misc
-device = 'cuda'
-torch.backends.cudnn.enabled = True
-torch.backends.cudnn.benchmark = True
-model_dir = 'fold{}'.format(fold)
-if not os.path.exists(os.path.join('./models/', model_dir)):
-    os.makedirs(os.path.join('./models/', model_dir))
-data_dir = './data/preprocessed/resize_s'
+device = 'cpu'
     
 # keypoints / graph
 d = 5 # 3 (for refinement stage)
@@ -72,43 +43,9 @@ num_epochs = 150
 init_lr = 0.1
 save_iter = 10
 
-
-# In[ ]:
-
-
 # load data
 
-imgs_fixed = {}
-masks_fixed = {}
-imgs_moving = {}
-masks_moving = {}
-
-for case in train_cases:
-    print('loading case {} ...'.format(case + 1), end=' ')
-    
-    t0 = time.time()
-    input_img_fixed = os.path.join(data_dir, 'case{}_img_fixed.nii.gz'.format(case + 1))
-    input_mask_fixed = os.path.join(data_dir, 'case{}_mask_fixed.nii.gz'.format(case + 1))
-    input_img_moving = os.path.join(data_dir, 'case{}_img_moving.nii.gz'.format(case + 1))
-    input_mask_moving = os.path.join(data_dir, 'case{}_mask_moving.nii.gz'.format(case + 1))
-    
-    img_fixed = (torch.from_numpy(nib.load(input_img_fixed).get_data()).unsqueeze(0).unsqueeze(0).float().clamp_(-1000, 1500) + 1000) / 2500
-    mask_fixed = torch.from_numpy(nib.load(input_mask_fixed).get_data()).unsqueeze(0).unsqueeze(0).bool()
-    img_moving = (torch.from_numpy(nib.load(input_img_moving).get_data()).unsqueeze(0).unsqueeze(0).float().clamp_(-1000, 1500) + 1000) / 2500
-    mask_moving = torch.from_numpy(nib.load(input_mask_moving).get_data()).unsqueeze(0).unsqueeze(0).bool()
-    
-    imgs_fixed[case] = img_fixed
-    masks_fixed[case] = mask_fixed
-    imgs_moving[case] = img_moving
-    masks_moving[case] = mask_moving
-    t1 = time.time()
-    
-    print('{:.2f} s'.format(t1-t0))
-
-_, _, D, H, W = imgs_fixed[train_cases[0]].shape
-
-
-# In[ ]:
+D, H, W = 192, 160, 192
 
 
 # displacement space
@@ -116,10 +53,19 @@ _, _, D, H, W = imgs_fixed[train_cases[0]].shape
 disp = torch.stack(torch.meshgrid(torch.arange(- q * l_max, q * l_max + 1, q * 2),
                                   torch.arange(- q * l_max, q * l_max + 1, q * 2),
                                   torch.arange(- q * l_max, q * l_max + 1, q * 2))).permute(1, 2, 3, 0).contiguous().view(1, -1, 3).float()
-disp = (disp.flip(-1) * 2 / (torch.tensor([W, H, D]) - 1)).to(device)
 
+#! torch.arange(- q * l_max, q * l_max + 1, q * 2)
+#!    -> torch.arange(-28, 29, 4) -> [-28, -24, -20, ... , 20, 24, 28], len 15 
 
-# In[ ]:
+#! stack(meshgrid(...)).permute(1,2,3,0) -> (15, 15, 15, 3)
+#! permute() moves (3, 15, 15, 15) -> (15, 15, 15, 3)
+
+#! disp (1, 3375, 3), 15**3 = 3375
+
+# tensor.contiguous() -> Returns a contiguous in memory tensor containing the same data as self tensor
+
+disp = (disp.flip(-1) * 2 / (torch.tensor([W, H, D]) - 1)).to(device) 
+#! (1, 3375, 3)
 
 
 # graphregnet
@@ -285,8 +231,6 @@ def init_weights(m):
             nn.init.constant(m.bias, 0.0)
 
 
-# In[ ]:
-
 
 # differentiable sparse-to-dense supervision
 
@@ -339,6 +283,17 @@ def inverse_grid_sample(input, grid, shape, mode='bilinear', padding_mode='zeros
     return InverseGridSample.apply(input, grid, shape, mode, padding_mode, align_corners)
 
 def densify(kpts, kpts_disp, shape, smooth_iter=3, kernel_size=5, eps=0.0001):
+    '''
+    Takes the keypoints, keypoint displacement and shape,
+    returns the grid
+
+    E.g.
+    keypoints: (1, 2048, 3),
+    keypoint displacement: (1, 2048, 3375, 3)
+    shape: (64, 53, 64)
+    returns grid: (1, 3, 64, 53, 64)
+    '''
+
     B, N, _ = kpts.shape
     device = kpts.device
     D, H, W = shape
@@ -356,11 +311,6 @@ def densify(kpts, kpts_disp, shape, smooth_iter=3, kernel_size=5, eps=0.0001):
     return grid
 
 
-# In[ ]:
-
-
-# training
-
 # model
 graphregnet = GraphRegNet(base, sigma2).to(device)
 graphregnet.apply(init_weights)
@@ -377,53 +327,63 @@ def criterion(feat_fixed, feat_moving, disp, mask):
 
 # statistics
 losses = []
-torch.cuda.synchronize()
-t0 = time.time()
 
-# for num_epochs epochs
-for epoch in range(num_epochs):
-    
+if True:
+
     # train mode
     graphregnet.train()
     
     # statistics
     running_loss = 0.0
     
-    # shuffle training cases
-    train_cases_perm = random.sample(train_cases, len(train_cases))
     
     # for all training cases
-    for case in train_cases_perm:
+    while True:
         
         # zero out gradients
         optimizer.zero_grad()
     
         # load data
-        img_fixed = imgs_fixed[case].to(device)
-        mask_fixed = masks_fixed[case].to(device)
-        img_moving = imgs_moving[case].to(device)
-        mask_moving = masks_moving[case].to(device)
+        img_fixed = torch.rand(1, 1, D, H, W).to(device) #! (1, 1, 192, 160, 192). Same for the other three
+        mask_fixed = torch.rand(1, 1, D, H, W).to(device)
+        img_moving = torch.rand(1, 1, D, H, W).to(device)
+        mask_moving = torch.rand(1, 1, D, H, W).to(device)
 
         # extract kpts and generate knn graph
-        kpts_fixed = foerstner_kpts(img_fixed, mask_fixed, d=d, num_points=N_P)
+        kpts_raw, kpts_fixed = foerstner_kpts(img_fixed, mask_fixed, d=d, num_points=N_P)
+        #! (1, 2048, 3), (1, 2048, 3)
         kpts_fixed_knn = knn_graph(kpts_fixed, k, include_self=True)[0]
-        
+        # ! (1, 2048, 15)
+
         # extract mind features 
         mind_fixed = mindssc(img_fixed)
-        mind_moving = mindssc(img_moving)
+        #! (1, 12, 192, 160, 192)
+        
+        mind_moving = mindssc(img_moving) 
+        #! (1, 12, 192, 160, 192)
 
         # displacement cost computation
         cost = ssd(kpts_fixed, mind_fixed, mind_moving, (D, H, W), l_max, q).view(-1, 1, l_width, l_width, l_width)
-        
+        #! (2048, 1, 29, 29, 29)
         # forward
-        kpts_fixed_disp_pred = graphregnet(cost, kpts_fixed, kpts_fixed_knn)
         
+        kpts_fixed_disp_pred = graphregnet(cost, kpts_fixed, kpts_fixed_knn)
+        #! (2048, 1, 15, 15, 15)
+
         # sparse to dense
-        disp_pred = densify(kpts_fixed, (disp.unsqueeze(1) * F.softmax(kpts_fixed_disp_pred.view(1, N_P, -1), 2).unsqueeze(3)).sum(2), (D//3, H//3, W//3))
+        disp_pred = densify(kpts_fixed, (disp.unsqueeze(1) * F.softmax(kpts_fixed_disp_pred.view(1, N_P, -1), 2).unsqueeze(3)).sum(2), (D//3, H//3, W//3)) 
+        #! kpts_fixed (1, 2048, 3)
+        #! (disp.unsqueeze(1) * F.softmax(kpts_fixed_disp_pred.view(1, N_P, -1), 2).unsqueeze(3)).shape (1, 2048, 3375, 3)
+        #! (D//3, H//3, W//3) (64, 53, 64)
+        
+        #! disp_pred (1, 3, 64, 53, 64)
+        
         disp_pred = F.interpolate(disp_pred, size=(D, H, W), mode='trilinear')
+        #! (1, 3, 192, 160, 192)
         
         # loss
         loss = criterion(mind_fixed, mind_moving, disp_pred, mask_moving)
+        #! scala
         
         # backward + optimize
         loss.backward()
@@ -432,31 +392,5 @@ for epoch in range(num_epochs):
         # statistics
         running_loss += loss.item()
 
-    running_loss /= (len(train_cases))
-    losses.append(running_loss)
         
-    if ((epoch + 1) % save_iter) == 0:
     
-        torch.cuda.synchronize()
-        t1 = time.time()
-        
-        print('epoch: ', epoch + 1)
-        print('loss: {:.4f}'.format(running_loss))
-        print('time (epoch): {:.4f} s'.format((t1 - t0) / save_iter))
-        gpu_usage()
-        print('---')
-        
-        torch.save(graphregnet.cpu().state_dict(), os.path.join('./models', model_dir, 'epoch{}.pth'.format(epoch)))
-        graphregnet.to(device)
-        
-        torch.cuda.synchronize()
-        t0 = time.time()
-
-torch.save(graph_reg_net.cpu().state_dict(), os.path.join('./models', model_dir, 'final.pth'))
-
-
-# In[ ]:
-
-
-
-
