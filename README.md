@@ -7,7 +7,7 @@ This is a two stage process:
 1. Using `Elastix` to do the initial alignment.
 1. Use `GraphRegNet` to refine the local regions.
 
-![img](rsc\workflow.PNG)
+![img](rsc/workflow.PNG)
 
 Source Draw.io file: `rsc\workflow.drawio` (can be edited by Draw.io Integration plugin in VS Code)
 
