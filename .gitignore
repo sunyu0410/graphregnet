@@ -1,0 +1,6 @@
+.vscode/
+__pycache__/
+kpts/
+models192/
+py37/
+
